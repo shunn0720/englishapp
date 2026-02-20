@@ -1,28 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOpenAI } from "@/lib/openai";
-import { logToNotion } from "@/lib/notion";
+import { auth } from "@/auth";
+import { prisma } from "@/lib/prisma";
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await auth();
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = await request.json();
-    const { japanese, level } = body;
+    const { japanese, unitId } = body;
 
     if (!japanese || typeof japanese !== "string" || japanese.trim() === "") {
       return NextResponse.json(
-        { error: "japanese field is required and must be a non-empty string" },
+        { error: "japanese field is required" },
         { status: 400 }
       );
     }
 
-    const studentLevel = level || "intermediate";
-    const levelDesc = {
-      beginner:
-        "生徒は初級レベル（中学1-2年）です。文法説明はとても分かりやすく、基本的な文型で解説してください。類題も簡単な日本語文にしてください。",
-      intermediate:
-        "生徒は中級レベル（中学3年〜高校1年）です。標準的な文法説明をし、やや応用的な類題を出してください。",
-      advanced:
-        "生徒は上級レベル（高校2-3年〜大学入試）です。高度な文法事項や表現のニュアンスまで解説し、難しめの類題を出してください。",
-    }[studentLevel] || "";
+    let levelDesc = "生徒は中級レベル（中学3年〜高校1年）です。標準的な文法説明をしてください。";
+
+    if (unitId) {
+      const unit = await prisma.unit.findUnique({
+        where: { id: unitId },
+        select: { name: true, nameEn: true, grade: true },
+      });
+      if (unit) {
+        levelDesc = `生徒は「${unit.name}」（${unit.nameEn}）の単元を学習中です（${unit.grade}レベル）。
+この単元で使う文法に注目して添削・解説してください。`;
+      }
+    }
 
     const completion = await getOpenAI().chat.completions.create({
       model: "gpt-4o-mini",
@@ -39,17 +48,12 @@ ${levelDesc}
   "related_questions": ["類題1の日本語文", "類題2の日本語文", "類題3の日本語文"]
 }`,
         },
-        {
-          role: "user",
-          content: japanese,
-        },
+        { role: "user", content: japanese },
       ],
     });
 
     const content = completion.choices[0]?.message?.content;
-    if (!content) {
-      throw new Error("No response from OpenAI");
-    }
+    if (!content) throw new Error("No response from OpenAI");
 
     const parsed = JSON.parse(content) as {
       ai_answer: string;
@@ -57,12 +61,23 @@ ${levelDesc}
       related_questions: string[];
     };
 
-    await logToNotion({
-      question: japanese,
-      student: japanese,
-      ai: parsed.ai_answer,
-      correct: true,
-      category: "英作文",
+    await prisma.quizSession.create({
+      data: {
+        studentId: session.user.id,
+        unitId: unitId || null,
+        type: "ESSAY",
+        score: 1,
+        total: 1,
+        answers: {
+          create: [{
+            questionIndex: 0,
+            question: japanese,
+            studentAnswer: japanese,
+            correctAnswer: parsed.ai_answer,
+            isCorrect: true,
+          }],
+        },
+      },
     });
 
     return NextResponse.json({
