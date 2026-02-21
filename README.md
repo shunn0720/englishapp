@@ -1,83 +1,98 @@
 # English Learning App
 
-塾・家庭教師向けの英語学習アプリ。AIを活用した単元別クイズ出題と、先生による生徒進捗管理を提供します。
+塾・家庭教師向けの AI 英語学習アプリ。
 
-## 機能
+単元別のクイズを AI が自動生成し、先生が生徒の進捗を管理できます。
 
-### 生徒向け
-- **単語クイズ** — 単元ごとの英単語・文法問題をAIが自動生成
-- **英作文添削** — 英作文をAIがリアルタイムで添削・フィードバック
-- **要約練習** — 英文要約スキルのトレーニング
-- **写真クイズ** — GPT-4o Visionを使った画像認識ベースの出題
-- **レベルテスト** — 実力診断テスト
+## 主な機能
 
-### 先生向け
-- **クラス管理** — クラス作成・招待コード発行
-- **生徒進捗ダッシュボード** — クイズ履歴・平均スコアの一覧表示
+**生徒**
+- 単語クイズ（単元ごとに AI が自動生成）
+- 英作文添削
+- 長文要約
+- 写真クイズ（GPT-4o Vision）
+- レベル診断テスト
 
-### 単元構成
-中1〜高2の英語文法30単元に対応（be動詞、一般動詞、三単現、不定詞、関係代名詞、仮定法 など）
+**先生**
+- クラス作成・招待コード発行
+- 生徒の進捗・スコア一覧
+
+中1〜高2 の英語文法 30 単元に対応。
 
 ## 技術スタック
 
-| カテゴリ | 技術 |
-|---|---|
-| フレームワーク | Next.js 16 (App Router, Turbopack) |
-| 言語 | TypeScript 5.9, React 19 |
-| 認証 | NextAuth v5 beta (Google OAuth + Email/Password) |
-| データベース | PostgreSQL + Prisma v7 (@prisma/adapter-pg) |
-| AI | OpenAI GPT-4o (Vision), GPT-4o-mini (テキスト生成) |
+- **Next.js 16** (App Router / Turbopack) + React 19 + TypeScript
+- **NextAuth v5** (Google OAuth + Email/Password)
+- **PostgreSQL** + Prisma v7 (`@prisma/adapter-pg`)
+- **OpenAI** GPT-4o / GPT-4o-mini
 
-## セットアップ
+## ローカル開発
 
 ### 前提条件
-- Node.js 20+
-- PostgreSQL データベース（[Railway](https://railway.app) 推奨）
-- OpenAI API キー
-- Google OAuth クレデンシャル（任意）
 
-### インストール
+- Node.js 20+
+- PostgreSQL（ローカル or [Railway](https://railway.app)）
+- [OpenAI API キー](https://platform.openai.com/api-keys)
+
+### セットアップ
 
 ```bash
-# リポジトリをクローン
 git clone https://github.com/shunn0720/englishapp.git
 cd englishapp
-
-# 依存パッケージをインストール
 npm install --legacy-peer-deps
 
-# 環境変数を設定
 cp .env.example .env
 # .env を編集して各値を入力
 
-# Prisma クライアントを生成
 npx prisma generate
-
-# データベースのマイグレーション
 npx prisma migrate dev --name init
-
-# シードデータ投入（英語30単元）
 npx prisma db seed
-```
 
-### 開発サーバー起動
-
-```bash
 npm run dev
 ```
 
-http://localhost:3000 でアプリが起動します。
+http://localhost:3000 で起動します。
 
-## 環境変数
+## Railway デプロイ
 
-| 変数名 | 説明 |
+### 1. プロジェクト作成
+
+1. [Railway](https://railway.app) にログイン
+2. **New Project** → **Deploy from GitHub repo** → `shunn0720/englishapp` を選択
+3. **Add PostgreSQL** プラグインを追加
+
+### 2. 環境変数の設定
+
+Railway ダッシュボードの **Variables** タブで以下を設定：
+
+| 変数名 | 値 |
 |---|---|
-| `DATABASE_URL` | PostgreSQL 接続文字列 |
+| `DATABASE_URL` | PostgreSQL プラグインが自動設定（`${{Postgres.DATABASE_URL}}` で参照） |
+| `AUTH_SECRET` | `openssl rand -hex 32` で生成した値 |
 | `OPENAI_API_KEY` | OpenAI API キー |
-| `AUTH_SECRET` | NextAuth シークレット（`openssl rand -hex 32` で生成） |
-| `AUTH_GOOGLE_ID` | Google OAuth クライアントID（任意） |
+| `NEXT_PUBLIC_APP_URL` | Railway が割り当てるドメイン（例: `https://xxxxx.up.railway.app`） |
+| `AUTH_GOOGLE_ID` | Google OAuth クライアント ID（任意） |
 | `AUTH_GOOGLE_SECRET` | Google OAuth クライアントシークレット（任意） |
-| `NEXT_PUBLIC_APP_URL` | アプリのURL（デフォルト: `http://localhost:3000`） |
+
+### 3. デプロイ
+
+`railway.toml` が自動でビルド・デプロイを制御します：
+
+- **ビルド**: `prisma generate` → `next build`
+- **起動**: `prisma migrate deploy` → `prisma db seed` → `next start`
+
+push するだけで自動デプロイされます。
+
+## 環境変数一覧
+
+| 変数名 | 必須 | 説明 |
+|---|---|---|
+| `DATABASE_URL` | Yes | PostgreSQL 接続文字列 |
+| `OPENAI_API_KEY` | Yes | OpenAI API キー |
+| `AUTH_SECRET` | Yes | NextAuth シークレット |
+| `NEXT_PUBLIC_APP_URL` | Yes | アプリの公開 URL |
+| `AUTH_GOOGLE_ID` | No | Google OAuth クライアント ID |
+| `AUTH_GOOGLE_SECRET` | No | Google OAuth シークレット |
 
 ## プロジェクト構成
 
@@ -85,28 +100,17 @@ http://localhost:3000 でアプリが起動します。
 src/
 ├── app/
 │   ├── (app)/              # 認証済みルート
-│   │   ├── page.tsx        # 生徒ホーム（単元一覧）
-│   │   ├── quiz/[type]/    # クイズページ
-│   │   ├── join/           # 招待コードでクラス参加
+│   │   ├── page.tsx        # 単元一覧（生徒ホーム）
+│   │   ├── quiz/[type]/    # クイズ実行
+│   │   ├── join/           # クラス参加
 │   │   └── teacher/        # 先生ダッシュボード
-│   ├── auth/               # 認証ページ（ログイン・新規登録）
-│   ├── api/                # APIルート
-│   └── globals.css
-├── components/             # UIコンポーネント
-│   ├── NavBar.tsx
-│   ├── UnitSelector.tsx
-│   ├── WordsPanel.tsx
-│   ├── EssayPanel.tsx
-│   ├── SummaryPanel.tsx
-│   └── PhotoQuizPanel.tsx
-├── lib/prisma.ts           # Prisma クライアント
+│   ├── auth/               # ログイン・新規登録
+│   └── api/                # API エンドポイント
+├── components/             # UI コンポーネント
+├── lib/prisma.ts           # DB クライアント
 ├── auth.ts                 # NextAuth 設定
-└── middleware.ts            # ルート保護
+└── middleware.ts            # 認証ガード
 prisma/
-├── schema.prisma           # データベーススキーマ
-└── seed.ts                 # シードデータ
+├── schema.prisma           # DB スキーマ
+└── seed.ts                 # 初期データ（30 単元）
 ```
-
-## ライセンス
-
-Private
