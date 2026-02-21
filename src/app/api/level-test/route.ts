@@ -1,9 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOpenAI } from "@/lib/openai";
+import { auth } from "@/auth";
+import { prisma } from "@/lib/prisma";
 
-// GET /api/level-test — Generate 10 diagnostic questions (mix of easy/medium/hard)
+// GET /api/level-test — Generate 10 diagnostic questions
 export async function GET() {
   try {
+    const session = await auth();
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const completion = await getOpenAI().chat.completions.create({
       model: "gpt-4o-mini",
       response_format: { type: "json_object" },
@@ -37,17 +44,12 @@ idは1〜10の連番にしてください。
 各レベルが最低2問以上含まれるようにしてください。
 問題は易しい順に並べてください。`,
         },
-        {
-          role: "user",
-          content: "レベル診断テストを10問生成してください。",
-        },
+        { role: "user", content: "レベル診断テストを10問生成してください。" },
       ],
     });
 
     const content = completion.choices[0]?.message?.content;
-    if (!content) {
-      throw new Error("No response from OpenAI");
-    }
+    if (!content) throw new Error("No response from OpenAI");
 
     const parsed = JSON.parse(content);
     return NextResponse.json({ questions: parsed.questions });
@@ -63,6 +65,11 @@ idは1〜10の連番にしてください。
 // POST /api/level-test — Score answers and determine level
 export async function POST(request: NextRequest) {
   try {
+    const session = await auth();
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = await request.json();
     const { items } = body as {
       items: {
@@ -75,31 +82,19 @@ export async function POST(request: NextRequest) {
     };
 
     if (!items || !Array.isArray(items) || items.length === 0) {
-      return NextResponse.json(
-        { error: "items array is required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "items array is required" }, { status: 400 });
     }
 
-    // Score each answer
-    const results = items.map((item) => {
-      const normalize = (s: string) =>
-        s
-          .trim()
-          .toLowerCase()
-          .replace(/^to\s+/, "")
-          .replace(/[。、．，]/g, "");
-      const isCorrect =
-        normalize(item.studentAnswer) === normalize(item.correctAnswer);
-      return {
-        id: item.id,
-        level: item.level,
-        correct: isCorrect,
-        correctAnswer: item.correctAnswer,
-      };
-    });
+    const normalize = (s: string) =>
+      s.trim().toLowerCase().replace(/^to\s+/, "").replace(/[。、．，]/g, "");
 
-    // Calculate score by level
+    const results = items.map((item) => ({
+      id: item.id,
+      level: item.level,
+      correct: normalize(item.studentAnswer) === normalize(item.correctAnswer),
+      correctAnswer: item.correctAnswer,
+    }));
+
     const scoreByLevel = {
       beginner: { correct: 0, total: 0 },
       intermediate: { correct: 0, total: 0 },
@@ -114,20 +109,13 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Determine level
     const totalCorrect = results.filter((r) => r.correct).length;
-    const beginnerRate =
-      scoreByLevel.beginner.total > 0
-        ? scoreByLevel.beginner.correct / scoreByLevel.beginner.total
-        : 0;
-    const intermediateRate =
-      scoreByLevel.intermediate.total > 0
-        ? scoreByLevel.intermediate.correct / scoreByLevel.intermediate.total
-        : 0;
-    const advancedRate =
-      scoreByLevel.advanced.total > 0
-        ? scoreByLevel.advanced.correct / scoreByLevel.advanced.total
-        : 0;
+    const beginnerRate = scoreByLevel.beginner.total > 0
+      ? scoreByLevel.beginner.correct / scoreByLevel.beginner.total : 0;
+    const intermediateRate = scoreByLevel.intermediate.total > 0
+      ? scoreByLevel.intermediate.correct / scoreByLevel.intermediate.total : 0;
+    const advancedRate = scoreByLevel.advanced.total > 0
+      ? scoreByLevel.advanced.correct / scoreByLevel.advanced.total : 0;
 
     let determinedLevel: "beginner" | "intermediate" | "advanced";
     if (advancedRate >= 0.6 && intermediateRate >= 0.7) {
@@ -137,6 +125,25 @@ export async function POST(request: NextRequest) {
     } else {
       determinedLevel = "beginner";
     }
+
+    // Save to DB
+    await prisma.quizSession.create({
+      data: {
+        studentId: session.user.id,
+        type: "LEVEL_TEST",
+        score: totalCorrect,
+        total: items.length,
+        answers: {
+          create: items.map((item, index) => ({
+            questionIndex: index,
+            question: item.question,
+            studentAnswer: item.studentAnswer,
+            correctAnswer: item.correctAnswer,
+            isCorrect: normalize(item.studentAnswer) === normalize(item.correctAnswer),
+          })),
+        },
+      },
+    });
 
     return NextResponse.json({
       results,

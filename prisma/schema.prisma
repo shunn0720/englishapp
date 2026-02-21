@@ -1,0 +1,172 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================
+// NextAuth.js Required Models
+// ============================
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  password      String?
+  role          Role      @default(STUDENT)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts         Account[]
+  sessions         Session[]
+  ownedClasses     Class[]        @relation("TeacherClasses")
+  classMemberships ClassMember[]
+  quizSessions     QuizSession[]
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ============================
+// Application Models
+// ============================
+
+enum Role {
+  TEACHER
+  STUDENT
+}
+
+enum QuizType {
+  WORDS
+  ESSAY
+  SUMMARY
+  PHOTO_QUIZ
+  LEVEL_TEST
+}
+
+model Class {
+  id         String   @id @default(cuid())
+  name       String
+  inviteCode String   @unique @default(cuid())
+  teacherId  String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  teacher User          @relation("TeacherClasses", fields: [teacherId], references: [id], onDelete: Cascade)
+  members ClassMember[]
+
+  @@map("classes")
+}
+
+model ClassMember {
+  id        String   @id @default(cuid())
+  classId   String
+  studentId String
+  joinedAt  DateTime @default(now())
+
+  class   Class @relation(fields: [classId], references: [id], onDelete: Cascade)
+  student User  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, studentId])
+  @@map("class_members")
+}
+
+model Subject {
+  id    String @id @default(cuid())
+  name  String @unique
+  icon  String @default("📚")
+  order Int    @default(0)
+
+  units Unit[]
+
+  @@map("subjects")
+}
+
+model Unit {
+  id        String @id @default(cuid())
+  subjectId String
+  name      String
+  nameEn    String @default("")
+  order     Int
+  grade     String @default("")
+
+  subject      Subject       @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  quizSessions QuizSession[]
+
+  @@unique([subjectId, order])
+  @@map("units")
+}
+
+model QuizSession {
+  id        String   @id @default(cuid())
+  studentId String
+  unitId    String?
+  type      QuizType
+  score     Int
+  total     Int
+  createdAt DateTime @default(now())
+
+  student User         @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  unit    Unit?        @relation(fields: [unitId], references: [id], onDelete: SetNull)
+  answers QuizAnswer[]
+
+  @@map("quiz_sessions")
+}
+
+model QuizAnswer {
+  id            String  @id @default(cuid())
+  sessionId     String
+  questionIndex Int
+  question      String  @db.Text
+  studentAnswer String  @db.Text
+  correctAnswer String  @db.Text
+  isCorrect     Boolean
+
+  session QuizSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("quiz_answers")
+}

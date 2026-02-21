@@ -1,15 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOpenAI } from "@/lib/openai";
-import { logToNotion } from "@/lib/notion";
+import { auth } from "@/auth";
+import { prisma } from "@/lib/prisma";
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await auth();
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = await request.json();
     const { text } = body;
 
     if (!text || typeof text !== "string" || text.trim() === "") {
       return NextResponse.json(
-        { error: "text field is required and must be a non-empty string" },
+        { error: "text field is required" },
         { status: 400 }
       );
     }
@@ -46,12 +52,22 @@ export async function POST(request: NextRequest) {
       reading: string;
     };
 
-    await logToNotion({
-      question: text,
-      student: text,
-      ai: parsed.summary,
-      correct: true,
-      category: "長文",
+    await prisma.quizSession.create({
+      data: {
+        studentId: session.user.id,
+        type: "SUMMARY",
+        score: 1,
+        total: 1,
+        answers: {
+          create: [{
+            questionIndex: 0,
+            question: text.slice(0, 500),
+            studentAnswer: text.slice(0, 500),
+            correctAnswer: parsed.summary.slice(0, 500),
+            isCorrect: true,
+          }],
+        },
+      },
     });
 
     return NextResponse.json({

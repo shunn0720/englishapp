@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOpenAI } from "@/lib/openai";
-import { logToNotion } from "@/lib/notion";
+import { auth } from "@/auth";
+import { prisma } from "@/lib/prisma";
 
 interface WordQuestion {
   id: number;
@@ -19,26 +20,32 @@ interface SubmitItem {
 }
 
 function normalize(s: string): string {
-  return s
-    .trim()
-    .toLowerCase()
-    .replace(/^to\s+/, "");
+  return s.trim().toLowerCase().replace(/^to\s+/, "");
 }
 
-// GET /api/words — Generate 10 vocabulary questions (level-aware)
+// GET /api/words — Generate 10 vocabulary questions (unit-aware)
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const level = searchParams.get("level") || "intermediate";
+    const session = await auth();
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-    const levelPrompt = {
-      beginner: `中学1〜2年生レベルの簡単な英単語（例: dog, book, run, happy, eat）を出題してください。
-基本的な名詞・動詞・形容詞を中心に出してください。`,
-      intermediate: `中学3年〜高校1年レベルの英単語（例: experience, environment, opportunity, valuable）を出題してください。
-日常会話や学校の教科書に出てくる標準的な単語を中心に出してください。`,
-      advanced: `高校2年〜大学入試レベルの英単語（例: elaborate, inevitable, perspective, comprehend, scrutiny）を出題してください。
-大学受験や英検準1級〜1級レベルの難易度の高い単語を出してください。`,
-    }[level] || "中学3年〜高校1年レベルの英単語を出題してください。";
+    const { searchParams } = new URL(request.url);
+    const unitId = searchParams.get("unitId");
+
+    let unitPrompt = "中学3年〜高校1年レベルの英単語を出題してください。";
+
+    if (unitId) {
+      const unit = await prisma.unit.findUnique({
+        where: { id: unitId },
+        select: { name: true, nameEn: true, grade: true },
+      });
+      if (unit) {
+        unitPrompt = `「${unit.name}」（${unit.nameEn}）の単元に関する英単語を出題してください。
+この単元は${unit.grade}レベルです。${unit.name}で学習する文法・語彙に関連した問題を出してください。`;
+      }
+    }
 
     const completion = await getOpenAI().chat.completions.create({
       model: "gpt-4o-mini",
@@ -48,7 +55,7 @@ export async function GET(request: NextRequest) {
           role: "system",
           content: `あなたは英語学習の家庭教師です。英単語クイズを10問生成してください。
 
-${levelPrompt}
+${unitPrompt}
 
 以下の3タイプを混合させてください:
 - "jp_to_en": 日本語の意味を見て英単語を答える
@@ -74,9 +81,7 @@ ${levelPrompt}
     });
 
     const content = completion.choices[0]?.message?.content;
-    if (!content) {
-      throw new Error("No response from OpenAI");
-    }
+    if (!content) throw new Error("No response from OpenAI");
 
     const parsed = JSON.parse(content) as { questions: WordQuestion[] };
     return NextResponse.json({ questions: parsed.questions });
@@ -89,11 +94,16 @@ ${levelPrompt}
   }
 }
 
-// POST /api/words — Score answers and log to Notion
+// POST /api/words — Score answers and save to DB
 export async function POST(request: NextRequest) {
   try {
+    const session = await auth();
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = await request.json();
-    const { items } = body as { items: SubmitItem[] };
+    const { items, unitId } = body as { items: SubmitItem[]; unitId?: string };
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return NextResponse.json(
@@ -102,26 +112,32 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const results = [];
+    const results = items.map((item) => ({
+      id: item.id,
+      correct: normalize(item.studentAnswer) === normalize(item.correctAnswer),
+      correctAnswer: item.correctAnswer,
+    }));
 
-    for (const item of items) {
-      const isCorrect =
-        normalize(item.studentAnswer) === normalize(item.correctAnswer);
+    const score = results.filter((r) => r.correct).length;
 
-      results.push({
-        id: item.id,
-        correct: isCorrect,
-        correctAnswer: item.correctAnswer,
-      });
-
-      await logToNotion({
-        question: item.question,
-        student: item.studentAnswer,
-        ai: item.correctAnswer,
-        correct: isCorrect,
-        category: "単語",
-      });
-    }
+    await prisma.quizSession.create({
+      data: {
+        studentId: session.user.id,
+        unitId: unitId || null,
+        type: "WORDS",
+        score,
+        total: results.length,
+        answers: {
+          create: items.map((item, index) => ({
+            questionIndex: index,
+            question: item.question,
+            studentAnswer: item.studentAnswer,
+            correctAnswer: item.correctAnswer,
+            isCorrect: normalize(item.studentAnswer) === normalize(item.correctAnswer),
+          })),
+        },
+      },
+    });
 
     return NextResponse.json({ results });
   } catch (error) {
