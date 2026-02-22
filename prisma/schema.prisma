@@ -170,3 +170,17 @@ model QuizAnswer {
 
   @@map("quiz_answers")
 }
+
+// Temporary storage for AI-generated questions (server-side answer verification)
+model PendingQuiz {
+  id        String   @id @default(cuid())
+  studentId String
+  unitId    String?
+  type      QuizType
+  questions Json     // Array of { id, type, q, a, hint?, level? }
+  createdAt DateTime @default(now())
+  expiresAt DateTime // Auto-cleanup after expiry
+
+  @@index([studentId, type])
+  @@map("pending_quizzes")
+}

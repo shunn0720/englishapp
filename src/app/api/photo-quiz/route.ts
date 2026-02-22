@@ -2,12 +2,22 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOpenAI } from "@/lib/openai";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { rateLimit } from "@/lib/rate-limit";
 
 export async function POST(request: NextRequest) {
   try {
     const session = await auth();
     if (!session?.user?.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    // Rate limit: 10 photo quiz requests per user per hour (uses gpt-4o)
+    const rl = rateLimit(`photo-quiz:${session.user.id}`, 10, 60 * 60 * 1000);
+    if (!rl.success) {
+      return NextResponse.json(
+        { error: "リクエストが多すぎます。しばらくしてからお試しください。" },
+        { status: 429 }
+      );
     }
 
     const formData = await request.formData();

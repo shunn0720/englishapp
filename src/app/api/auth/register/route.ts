@@ -1,10 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
+import { rateLimit } from "@/lib/rate-limit";
+
+const TEACHER_SECRET = process.env.TEACHER_SECRET || "";
 
 export async function POST(request: NextRequest) {
   try {
-    const { name, email, password, role } = await request.json();
+    // Rate limit: 5 registrations per IP per 15 minutes
+    const ip = request.headers.get("x-forwarded-for")?.split(",")[0] || "unknown";
+    const rl = rateLimit(`register:${ip}`, 5, 15 * 60 * 1000);
+    if (!rl.success) {
+      return NextResponse.json(
+        { error: "リクエストが多すぎます。しばらくしてからお試しください。" },
+        { status: 429 }
+      );
+    }
+
+    const { name, email, password, role, teacherSecret } = await request.json();
 
     if (!email || !password || !name) {
       return NextResponse.json(
@@ -13,11 +26,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (password.length < 6) {
+    if (password.length < 8) {
       return NextResponse.json(
-        { error: "パスワードは6文字以上必要です" },
+        { error: "パスワードは8文字以上必要です" },
         { status: 400 }
       );
+    }
+
+    // Determine role: TEACHER requires correct secret
+    let assignedRole: "TEACHER" | "STUDENT" = "STUDENT";
+    if (role === "TEACHER") {
+      if (!TEACHER_SECRET || teacherSecret !== TEACHER_SECRET) {
+        return NextResponse.json(
+          { error: "先生用シークレットコードが正しくありません" },
+          { status: 403 }
+        );
+      }
+      assignedRole = "TEACHER";
     }
 
     const existing = await prisma.user.findUnique({ where: { email } });
@@ -34,7 +59,7 @@ export async function POST(request: NextRequest) {
         name,
         email,
         password: hashedPassword,
-        role: role === "TEACHER" ? "TEACHER" : "STUDENT",
+        role: assignedRole,
       },
     });
 

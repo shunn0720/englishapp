@@ -9,6 +9,7 @@ export default function SignUpPage() {
   const router = useRouter();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [role, setRole] = useState<"STUDENT" | "TEACHER">("STUDENT");
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -19,13 +20,13 @@ export default function SignUpPage() {
     const name = formData.get("name") as string;
     const email = formData.get("email") as string;
     const password = formData.get("password") as string;
-    const role = formData.get("role") as string;
+    const teacherSecret = formData.get("teacherSecret") as string;
 
     try {
       const res = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password, role }),
+        body: JSON.stringify({ name, email, password, role, teacherSecret }),
       });
 
       if (!res.ok) {
@@ -88,8 +89,8 @@ export default function SignUpPage() {
             name="password"
             type="password"
             required
-            minLength={6}
-            placeholder="6文字以上"
+            minLength={8}
+            placeholder="8文字以上"
             className="auth-input"
           />
         </div>
@@ -97,7 +98,13 @@ export default function SignUpPage() {
           <label>アカウントの種類</label>
           <div className="role-selector">
             <label className="role-option">
-              <input type="radio" name="role" value="STUDENT" defaultChecked />
+              <input
+                type="radio"
+                name="role"
+                value="STUDENT"
+                checked={role === "STUDENT"}
+                onChange={() => setRole("STUDENT")}
+              />
               <div className="role-card">
                 <span className="role-icon">🎒</span>
                 <span className="role-label">生徒</span>
@@ -105,7 +112,13 @@ export default function SignUpPage() {
               </div>
             </label>
             <label className="role-option">
-              <input type="radio" name="role" value="TEACHER" />
+              <input
+                type="radio"
+                name="role"
+                value="TEACHER"
+                checked={role === "TEACHER"}
+                onChange={() => setRole("TEACHER")}
+              />
               <div className="role-card">
                 <span className="role-icon">👨‍🏫</span>
                 <span className="role-label">先生</span>
@@ -114,6 +127,19 @@ export default function SignUpPage() {
             </label>
           </div>
         </div>
+        {role === "TEACHER" && (
+          <div className="auth-field">
+            <label htmlFor="teacherSecret">先生用シークレットコード</label>
+            <input
+              id="teacherSecret"
+              name="teacherSecret"
+              type="password"
+              required
+              placeholder="管理者から提供されたコードを入力"
+              className="auth-input"
+            />
+          </div>
+        )}
         <button type="submit" className="primary-btn" disabled={loading}>
           {loading ? (
             <span className="spinner-wrap">
