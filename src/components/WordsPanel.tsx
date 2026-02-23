@@ -1,7 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import type { WordQuestion, WordResult } from "@/types/quiz";
+import type { WordResult } from "@/types/quiz";
+
+interface QuestionDisplay {
+  id: number;
+  type: "jp_to_en" | "en_to_jp" | "fill_blank";
+  q: string;
+  hint?: string;
+}
 
 interface Props {
   unitId?: string;
@@ -9,7 +16,8 @@ interface Props {
 }
 
 export default function WordsPanel({ unitId, unitName }: Props) {
-  const [questions, setQuestions] = useState<WordQuestion[]>([]);
+  const [quizId, setQuizId] = useState<string | null>(null);
+  const [questions, setQuestions] = useState<QuestionDisplay[]>([]);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [results, setResults] = useState<WordResult[] | null>(null);
   const [loading, setLoading] = useState(false);
@@ -20,6 +28,7 @@ export default function WordsPanel({ unitId, unitName }: Props) {
   const generateQuiz = async () => {
     if (loading) return;
     setLoading(true);
+    setQuizId(null);
     setQuestions([]);
     setAnswers({});
     setResults(null);
@@ -32,6 +41,7 @@ export default function WordsPanel({ unitId, unitName }: Props) {
       const res = await fetch(`/api/words?${params.toString()}`);
       if (!res.ok) throw new Error("クイズ生成に失敗しました");
       const data = await res.json();
+      setQuizId(data.quizId);
       setQuestions(data.questions);
     } catch (e) {
       setError(e instanceof Error ? e.message : "エラーが発生しました");
@@ -41,7 +51,7 @@ export default function WordsPanel({ unitId, unitName }: Props) {
   };
 
   const submitAnswers = async () => {
-    if (scoring) return;
+    if (scoring || !quizId) return;
     setScoring(true);
     setSaved(false);
     setError("");
@@ -49,16 +59,13 @@ export default function WordsPanel({ unitId, unitName }: Props) {
     try {
       const items = questions.map((q) => ({
         id: q.id,
-        type: q.type,
-        question: q.q,
         studentAnswer: answers[q.id] || "",
-        correctAnswer: q.a,
       }));
 
       const res = await fetch("/api/words", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items, unitId }),
+        body: JSON.stringify({ quizId, items }),
       });
       if (!res.ok) throw new Error("採点に失敗しました");
       const data = await res.json();

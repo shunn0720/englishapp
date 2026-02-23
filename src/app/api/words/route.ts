@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOpenAI } from "@/lib/openai";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { rateLimit } from "@/lib/rate-limit";
 
 interface WordQuestion {
   id: number;
@@ -13,10 +14,7 @@ interface WordQuestion {
 
 interface SubmitItem {
   id: number;
-  type: string;
-  question: string;
   studentAnswer: string;
-  correctAnswer: string;
 }
 
 function normalize(s: string): string {
@@ -29,6 +27,15 @@ export async function GET(request: NextRequest) {
     const session = await auth();
     if (!session?.user?.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    // Rate limit: 20 quiz generations per user per hour
+    const rl = rateLimit(`words:${session.user.id}`, 20, 60 * 60 * 1000);
+    if (!rl.success) {
+      return NextResponse.json(
+        { error: "リクエストが多すぎます。しばらくしてからお試しください。" },
+        { status: 429 }
+      );
     }
 
     const { searchParams } = new URL(request.url);
@@ -84,7 +91,30 @@ ${unitPrompt}
     if (!content) throw new Error("No response from OpenAI");
 
     const parsed = JSON.parse(content) as { questions: WordQuestion[] };
-    return NextResponse.json({ questions: parsed.questions });
+
+    // Save questions server-side for tamper-proof grading
+    const pendingQuiz = await prisma.pendingQuiz.create({
+      data: {
+        studentId: session.user.id,
+        unitId: unitId || null,
+        type: "WORDS",
+        questions: JSON.parse(JSON.stringify(parsed.questions)),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+      },
+    });
+
+    // Return questions without answers
+    const questionsWithoutAnswers = parsed.questions.map((q) => ({
+      id: q.id,
+      type: q.type,
+      q: q.q,
+      hint: q.hint,
+    }));
+
+    return NextResponse.json({
+      quizId: pendingQuiz.id,
+      questions: questionsWithoutAnswers,
+    });
   } catch (error) {
     console.error("Error in GET /api/words:", error);
     return NextResponse.json(
@@ -94,7 +124,7 @@ ${unitPrompt}
   }
 }
 
-// POST /api/words — Score answers and save to DB
+// POST /api/words — Score answers using server-stored correct answers
 export async function POST(request: NextRequest) {
   try {
     const session = await auth();
@@ -103,41 +133,77 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { items, unitId } = body as { items: SubmitItem[]; unitId?: string };
+    const { quizId, items } = body as { quizId: string; items: SubmitItem[] };
 
-    if (!items || !Array.isArray(items) || items.length === 0) {
+    if (!quizId || !items || !Array.isArray(items) || items.length === 0) {
       return NextResponse.json(
-        { error: "items array is required" },
+        { error: "quizId and items array are required" },
         { status: 400 }
       );
     }
 
-    const results = items.map((item) => ({
-      id: item.id,
-      correct: normalize(item.studentAnswer) === normalize(item.correctAnswer),
-      correctAnswer: item.correctAnswer,
-    }));
+    // Fetch server-stored questions
+    const pendingQuiz = await prisma.pendingQuiz.findUnique({
+      where: { id: quizId },
+    });
+
+    if (!pendingQuiz || pendingQuiz.studentId !== session.user.id) {
+      return NextResponse.json(
+        { error: "Quiz not found or unauthorized" },
+        { status: 404 }
+      );
+    }
+
+    if (pendingQuiz.expiresAt < new Date()) {
+      await prisma.pendingQuiz.delete({ where: { id: quizId } });
+      return NextResponse.json(
+        { error: "Quiz expired. Please generate a new one." },
+        { status: 410 }
+      );
+    }
+
+    const serverQuestions = pendingQuiz.questions as unknown as WordQuestion[];
+
+    // Build answer map from server-stored data
+    const answerMap = new Map<number, WordQuestion>();
+    for (const q of serverQuestions) {
+      answerMap.set(q.id, q);
+    }
+
+    const results = items.map((item) => {
+      const serverQ = answerMap.get(item.id);
+      if (!serverQ) return { id: item.id, correct: false, correctAnswer: "?" };
+      const correct = normalize(item.studentAnswer) === normalize(serverQ.a);
+      return { id: item.id, correct, correctAnswer: serverQ.a };
+    });
 
     const score = results.filter((r) => r.correct).length;
 
+    // Save quiz session
     await prisma.quizSession.create({
       data: {
         studentId: session.user.id,
-        unitId: unitId || null,
+        unitId: pendingQuiz.unitId,
         type: "WORDS",
         score,
         total: results.length,
         answers: {
-          create: items.map((item, index) => ({
-            questionIndex: index,
-            question: item.question,
-            studentAnswer: item.studentAnswer,
-            correctAnswer: item.correctAnswer,
-            isCorrect: normalize(item.studentAnswer) === normalize(item.correctAnswer),
-          })),
+          create: items.map((item, index) => {
+            const serverQ = answerMap.get(item.id);
+            return {
+              questionIndex: index,
+              question: serverQ?.q || "",
+              studentAnswer: item.studentAnswer,
+              correctAnswer: serverQ?.a || "",
+              isCorrect: normalize(item.studentAnswer) === normalize(serverQ?.a || ""),
+            };
+          }),
         },
       },
     });
+
+    // Clean up pending quiz
+    await prisma.pendingQuiz.delete({ where: { id: quizId } });
 
     return NextResponse.json({ results });
   } catch (error) {

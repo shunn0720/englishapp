@@ -2,6 +2,20 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOpenAI } from "@/lib/openai";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { rateLimit } from "@/lib/rate-limit";
+
+interface LevelQuestion {
+  id: number;
+  level: string;
+  type: string;
+  q: string;
+  a: string;
+}
+
+interface SubmitItem {
+  id: number;
+  studentAnswer: string;
+}
 
 // GET /api/level-test — Generate 10 diagnostic questions
 export async function GET() {
@@ -9,6 +23,15 @@ export async function GET() {
     const session = await auth();
     if (!session?.user?.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    // Rate limit: 5 level tests per user per hour
+    const rl = rateLimit(`level-test:${session.user.id}`, 5, 60 * 60 * 1000);
+    if (!rl.success) {
+      return NextResponse.json(
+        { error: "リクエストが多すぎます。しばらくしてからお試しください。" },
+        { status: 429 }
+      );
     }
 
     const completion = await getOpenAI().chat.completions.create({
@@ -51,8 +74,30 @@ idは1〜10の連番にしてください。
     const content = completion.choices[0]?.message?.content;
     if (!content) throw new Error("No response from OpenAI");
 
-    const parsed = JSON.parse(content);
-    return NextResponse.json({ questions: parsed.questions });
+    const parsed = JSON.parse(content) as { questions: LevelQuestion[] };
+
+    // Save questions server-side for tamper-proof grading
+    const pendingQuiz = await prisma.pendingQuiz.create({
+      data: {
+        studentId: session.user.id,
+        type: "LEVEL_TEST",
+        questions: JSON.parse(JSON.stringify(parsed.questions)),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+      },
+    });
+
+    // Return questions without answers
+    const questionsWithoutAnswers = parsed.questions.map((q) => ({
+      id: q.id,
+      level: q.level,
+      type: q.type,
+      q: q.q,
+    }));
+
+    return NextResponse.json({
+      quizId: pendingQuiz.id,
+      questions: questionsWithoutAnswers,
+    });
   } catch (error) {
     console.error("Error in GET /api/level-test:", error);
     return NextResponse.json(
@@ -62,7 +107,7 @@ idは1〜10の連番にしてください。
   }
 }
 
-// POST /api/level-test — Score answers and determine level
+// POST /api/level-test — Score answers using server-stored correct answers
 export async function POST(request: NextRequest) {
   try {
     const session = await auth();
@@ -71,29 +116,47 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { items } = body as {
-      items: {
-        id: number;
-        level: string;
-        question: string;
-        studentAnswer: string;
-        correctAnswer: string;
-      }[];
-    };
+    const { quizId, items } = body as { quizId: string; items: SubmitItem[] };
 
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return NextResponse.json({ error: "items array is required" }, { status: 400 });
+    if (!quizId || !items || !Array.isArray(items) || items.length === 0) {
+      return NextResponse.json({ error: "quizId and items array are required" }, { status: 400 });
+    }
+
+    // Fetch server-stored questions
+    const pendingQuiz = await prisma.pendingQuiz.findUnique({
+      where: { id: quizId },
+    });
+
+    if (!pendingQuiz || pendingQuiz.studentId !== session.user.id) {
+      return NextResponse.json(
+        { error: "Quiz not found or unauthorized" },
+        { status: 404 }
+      );
+    }
+
+    if (pendingQuiz.expiresAt < new Date()) {
+      await prisma.pendingQuiz.delete({ where: { id: quizId } });
+      return NextResponse.json(
+        { error: "Quiz expired. Please generate a new one." },
+        { status: 410 }
+      );
+    }
+
+    const serverQuestions = pendingQuiz.questions as unknown as LevelQuestion[];
+    const answerMap = new Map<number, LevelQuestion>();
+    for (const q of serverQuestions) {
+      answerMap.set(q.id, q);
     }
 
     const normalize = (s: string) =>
       s.trim().toLowerCase().replace(/^to\s+/, "").replace(/[。、．，]/g, "");
 
-    const results = items.map((item) => ({
-      id: item.id,
-      level: item.level,
-      correct: normalize(item.studentAnswer) === normalize(item.correctAnswer),
-      correctAnswer: item.correctAnswer,
-    }));
+    const results = items.map((item) => {
+      const serverQ = answerMap.get(item.id);
+      if (!serverQ) return { id: item.id, level: "beginner", correct: false, correctAnswer: "?" };
+      const correct = normalize(item.studentAnswer) === normalize(serverQ.a);
+      return { id: item.id, level: serverQ.level, correct, correctAnswer: serverQ.a };
+    });
 
     const scoreByLevel = {
       beginner: { correct: 0, total: 0 },
@@ -134,16 +197,22 @@ export async function POST(request: NextRequest) {
         score: totalCorrect,
         total: items.length,
         answers: {
-          create: items.map((item, index) => ({
-            questionIndex: index,
-            question: item.question,
-            studentAnswer: item.studentAnswer,
-            correctAnswer: item.correctAnswer,
-            isCorrect: normalize(item.studentAnswer) === normalize(item.correctAnswer),
-          })),
+          create: items.map((item, index) => {
+            const serverQ = answerMap.get(item.id);
+            return {
+              questionIndex: index,
+              question: serverQ?.q || "",
+              studentAnswer: item.studentAnswer,
+              correctAnswer: serverQ?.a || "",
+              isCorrect: normalize(item.studentAnswer) === normalize(serverQ?.a || ""),
+            };
+          }),
         },
       },
     });
+
+    // Clean up pending quiz
+    await prisma.pendingQuiz.delete({ where: { id: quizId } });
 
     return NextResponse.json({
       results,
